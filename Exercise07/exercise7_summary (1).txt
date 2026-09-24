@@ -1,0 +1,101 @@
+====================================================================
+Exercise 7: Summary Comparison
+====================================================================
+
+--------------------------------------------------------------------
+7.1 Comparison Table
+--------------------------------------------------------------------
+
+Program           | Collectives used              | Array allocation                                  | Manual sum loop on root? | Where final result is available
+------------------|--------------------------------|----------------------------------------------------|---------------------------|----------------------------------
+sum_bcast.c       | MPI_Bcast + Send/Recv         | Every process allocates the full array (size N)    | Yes - loops over MPI_Recv | Root only
+sum_scatter.c     | MPI_Scatter + Send/Recv       | Only root allocates full N; others get N/size chunk| Yes - loops over MPI_Recv | Root only
+sum_gather.c      | MPI_Scatter + MPI_Gather      | Root full N; others N/size chunk                    | Yes - loops over all_sums[] | Root only
+sum_reduce.c      | MPI_Scatter + MPI_Reduce      | Root full N; others N/size chunk                    | No - MPI_SUM does it     | Root only
+sum_allreduce.c   | MPI_Scatter + MPI_Allreduce   | Root full N; others N/size chunk                    | No - MPI_SUM does it     | All processes (identical total)
+sum_scan.c        | MPI_Scatter + MPI_Scan        | Root full N; others N/size chunk                    | No - MPI_SUM does it     | All processes, but DIFFERENT per rank
+                   |                                |                                                      |                           | (cumulative prefix sum; only the
+                   |                                |                                                      |                           | last rank's value equals the total)
+
+
+--------------------------------------------------------------------
+7.2 Timing Runs
+--------------------------------------------------------------------
+
+Measured on: thisal@MSI (laptop)
+Command pattern:  mpirun -np <N> ./<program>
+
+Program           | np = 2   | np = 4   | np = 8
+------------------|----------|----------|----------
+sum_bcast (ex1)   | 0.0038 s | 0.0106 s | 0.0072 s
+sum_scatter       | 0.0035 s | 0.0025 s | 0.0021 s
+sum_gather        | 0.0050 s | 0.0052 s | 0.0027 s
+sum_reduce        | 0.0034 s | 0.0033 s | 0.0021 s
+sum_allreduce     | 0.0036 s | 0.0048 s | 0.0044 s
+sum_scan          | 0.0130 s | 0.0130 s | 0.0252 s
+
+Discussion of the trend:
+
+- sum_scatter and sum_reduce get FASTER as np grows (0.0035->0.0021 s,
+  0.0034->0.0021 s). More processes means a smaller chunk per process,
+  and the collective communication overhead stays low. This is the
+  expected payoff of replacing Bcast with Scatter, and replacing the
+  manual Send/Recv loop with Reduce.
+
+- sum_bcast is fastest at np=2 but jumps sharply at np=4 (0.0106 s).
+  This matches the theory: it broadcasts the FULL array to every
+  process regardless of process count, and its Send/Recv collection
+  loop on root is O(P), so it scales worse as more processes are
+  added. The np=8 dip back to 0.0072 s is likely just system noise on
+  a single run - re-running a few times and averaging would make this
+  trend cleaner.
+
+- sum_gather drops at np=8 after being flat at np=2/4. Plausible, but
+  also worth repeat runs given how small these numbers are (a few
+  milliseconds is close to timer/scheduling noise on a laptop).
+
+- sum_scan is clearly the SLOWEST and WORST-SCALING of the six
+  (0.0130 -> 0.0130 -> 0.0252 s). Unlike Allreduce, Scan can't fully
+  parallelize: rank i's result strictly depends on ranks 0..i-1
+  finishing first. That ordering constraint limits how much the
+  algorithm can overlap communication, so cost tends to increase with
+  np - this is the clearest upward trend of any program in the table.
+
+- sum_allreduce sits in the middle and creeps up slightly
+  (0.0036 -> 0.0048 -> 0.0044 s). It does strictly more work than
+  Reduce (delivers the result to every process, not just root) but
+  still uses an efficient algorithm rather than a serial loop, so it
+  shouldn't scale nearly as badly as Bcast or Scan.
+
+Caveat: these are single-run timings on a personal laptop, so process
+scheduling, background load, and (if used) --oversubscribe all add
+variance. For a stronger report, run each program 3-5 times per np
+and record the average or minimum time instead of a single sample.
+
+
+--------------------------------------------------------------------
+7.3 Thinking Question
+--------------------------------------------------------------------
+
+In what situation would you choose MPI_Scan over MPI_Allreduce? Give
+a concrete example.
+
+Use MPI_Scan when each process needs to know its own POSITION within
+an ordered accumulation, not just the grand total that MPI_Allreduce
+provides.
+
+Concrete example: parallel stream compaction / filtering with global
+index assignment. Suppose each process independently filters its
+local chunk of data and keeps only some items. Each process counts
+how many items it kept (local_count), then calls MPI_Scan with
+MPI_SUM to get prefix_sum. Subtracting local_count gives
+sum_before_me - the number of kept items across all lower-ranked
+processes. Each process can then write its own kept items starting
+at global index sum_before_me, giving every process a unique,
+correctly-ordered slot in a shared output array - all without any
+additional communication.
+
+MPI_Allreduce cannot do this, because it only gives every process the
+SAME final total; it has no notion of "everything before me."
+
+====================================================================
